@@ -1,0 +1,5 @@
+node_modules/
+*.log
+jar.txt
+server.out
+.DS_Store

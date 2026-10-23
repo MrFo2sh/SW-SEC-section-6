@@ -1,0 +1,31 @@
+{
+  "name": "deaddrop-chain-lab",
+  "version": "1.0.0",
+  "description": "DeadDrop — a beginner capstone CTF that chains the whole course so far: Recon+Fuzzing -> IDOR -> Blind XSS -> SQL injection. Each link's loot opens the next. No payloads shown; shallow conceptual hints only. FOR EDUCATIONAL USE ON LOCALHOST ONLY.",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "keywords": [
+    "security",
+    "education",
+    "ctf",
+    "attack-chain",
+    "recon",
+    "fuzzing",
+    "idor",
+    "xss",
+    "sql-injection",
+    "beginner",
+    "owasp",
+    "lab"
+  ],
+  "engines": { "node": ">=16" },
+  "license": "MIT",
+  "private": true,
+  "dependencies": {
+    "express": "^4.21.2",
+    "sql.js": "^1.12.0"
+  }
+}
