@@ -3,3 +3,4 @@ node_modules/
 jar.txt
 server.out
 .DS_Store
+deaddrop-data.json

