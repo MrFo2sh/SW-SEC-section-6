@@ -39,7 +39,16 @@ That's the brief. The rest is yours to discover. 🫡
 
 ## Recon toolkit (how to look — not what you'll find)
 
-Map the target first. Two kinds of fuzzing both matter here:
+Map the target first.
+
+**Read the response headers.** Before anything else, look at what the server
+says about itself:
+```bash
+curl -I http://localhost:5000/
+```
+A backend often names itself in a header. What hostname does it report? What
+does that tell you about how it's served — and what *else* might be served the
+same way?
 
 **Directories** — guess paths nothing links to:
 ```bash
@@ -47,9 +56,9 @@ ffuf -u http://localhost:5000/FUZZ \
      -w /usr/share/seclists/Discovery/Web-Content/common.txt -mc 200 -ic -c
 ```
 
-**Virtual hosts** — guess hostnames the server quietly answers to. Find the
-site's domain first (check the page source and the footer), then fuzz the
-`Host` header and drop the boring same-sized responses:
+**Virtual hosts** — guess hostnames the server quietly answers to. You already
+learned the domain from the headers (and it's in the footer). Fuzz the `Host`
+header and drop the boring same-sized responses:
 ```bash
 ffuf -w /usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt \
      -u http://127.0.0.1:5000/ -H "Host: FUZZ.<the-domain>" -ac

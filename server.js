@@ -34,7 +34,8 @@ const { buildDatabase, runQuery } = require("./db");
 const app = express();
 const PORT = process.env.PORT || 5000;
 const BASE_DOMAIN = "deaddrop.local";
-const SECRET_VHOST = "internal." + BASE_DOMAIN;
+const APP_VHOST = "app." + BASE_DOMAIN;        // the canonical main-app vhost
+const SECRET_VHOST = "internal." + BASE_DOMAIN; // the one you find by fuzzing
 app.use(express.urlencoded({ extended: false }));
 
 /* ---- secrets / data ---------------------------------------------- */
@@ -105,6 +106,10 @@ app.use((req, res, next) => {
   req.user = acct ? acct.handle : null;
   req.role = acct ? acct.role : null;
   req.vhost = String(req.headers.host || "").split(":")[0].toLowerCase();
+  // The backend names itself. Hit it by raw IP / localhost and this header
+  // reveals the canonical vhost -> infer it's vhost-based -> fuzz for siblings.
+  res.setHeader("Server", "DeadDrop");
+  res.setHeader("X-Served-By", req.vhost === SECRET_VHOST ? SECRET_VHOST : APP_VHOST);
   next();
 });
 
@@ -219,7 +224,7 @@ app.get("/api/users/:id", (req, res) => {
  *  Home / register / login
  * ================================================================== */
 app.get("/", (req, res) => res.send(layout("DeadDrop", `
-  <!-- note to self: staff tools moved off the main site. check the internal vhost. -->
+  <!-- ops: canonical host is app.deaddrop.local · staff tools run on their own vhost -->
   ${card(`
     <h1 class="text-2xl font-bold">Secure notes, with a human on support.</h1>
     <p class="mt-2 text-slate-500">Create an account, keep your notes, open a ticket if anything breaks.</p>
@@ -436,8 +441,9 @@ buildDatabase(FINAL_FLAG).then((db) => {
   DB = db;
   app.listen(PORT, "0.0.0.0", () => {
     console.log("=".repeat(62));
-    console.log(`  DeadDrop:  http://localhost:${PORT}`);
-    console.log(`  vhost:     ${SECRET_VHOST}  (fuzz the Host header to find it)`);
+    console.log(`  DeadDrop:   http://localhost:${PORT}   (serves on any host)`);
+    console.log(`  canonical:  ${APP_VHOST}      (advertised via X-Served-By)`);
+    console.log(`  secret:     ${SECRET_VHOST}  (fuzz the Host header to find it)`);
     console.log("  Deliberately vulnerable · localhost only · do not deploy.");
     console.log("=".repeat(62));
   });

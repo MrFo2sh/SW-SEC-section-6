@@ -31,6 +31,20 @@ Final flag: `FLAG{ch41n3d_rec0n_id0r_xss_sqli}`
 
 ## Link 1 — Recon + Fuzzing  (marks `recon`)
 
+**Response-header recon (the intended first move).** The app serves on any host
+but names itself in a header. Hitting the raw IP / localhost shows it:
+```bash
+curl -I http://localhost:5000/
+# Server: DeadDrop
+# X-Served-By: app.deaddrop.local      <-- canonical vhost
+```
+Lesson: the backend is **vhost-based** and its domain is `deaddrop.local`. If
+there's an `app.` host, there are probably others → go vhost-fuzz. (The home
+HTML comment and the footer `hello@deaddrop.local` reinforce the domain; the
+comment also hints "staff tools run on their own vhost" without naming it.)
+`app.deaddrop.local` and `internal.deaddrop.local` each report their own name in
+`X-Served-By`.
+
 **Directory fuzzing** (as in the recon lab):
 ```bash
 ffuf -u http://localhost:5000/FUZZ -w /usr/share/seclists/Discovery/Web-Content/common.txt -mc 200 -ic -c
